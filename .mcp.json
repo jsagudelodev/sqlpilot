@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sqlpilot": {
+      "command": "J:/ProyectosGithub/sqlpilot/backend/.venv/Scripts/sqlpilot.exe",
+      "args": ["mcp"],
+      "cwd": "J:/ProyectosGithub/sqlpilot/backend"
+    }
+  }
+}

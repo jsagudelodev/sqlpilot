@@ -1,0 +1,53 @@
+# ----- Secretos y configuración local (NUNCA subir) -----
+.env
+.env.*
+!.env.ejemplo
+**/.env
+**/.env.*
+!**/.env.ejemplo
+sqlpilot.toml
+**/sqlpilot.toml
+!sqlpilot.toml.ejemplo
+*.pem
+*.pfx
+*.key
+secrets/
+
+# Datos generados por SQLPilot (bitácora, snapshots, planes exportados)
+.sqlpilot/
+bitacora.jsonl
+*.jsonl
+snapshots/
+*.sqlplan
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ----- Node / Angular (frontend futuro) -----
+node_modules/
+frontend/dist/
+frontend/.angular/
+npm-debug.log*
+
+# ----- IDE / SO -----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code: configuración local del usuario
+.claude/settings.local.json

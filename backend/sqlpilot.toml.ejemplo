@@ -1,0 +1,33 @@
+# Copia este archivo como sqlpilot.toml (junto al que ejecutas) o en ~/.sqlpilot/sqlpilot.toml
+
+perfil_default = "local"
+
+[llm]
+proveedor = "anthropic"        # anthropic | openai | gemini | ollama
+modelo = "claude-opus-5"       # gemini: "gemini-2.5-pro" / "gemini-2.5-flash"; openai: "gpt-4.1"
+esfuerzo = "high"              # low | medium | high | xhigh | max (solo Anthropic)
+# api_key se lee de ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY o SQLPILOT_LLM_API_KEY
+# base_url = "http://localhost:11434/v1"   # solo para Ollama u otro endpoint compatible OpenAI
+
+[perfiles.demo]                # base creada por scripts/demo_sp_prueba.sql
+servidor = "localhost"
+base_datos = "SQLPilotDemo"
+autenticacion = "windows"
+
+[agente]
+max_filas_resultado = 200
+max_caracteres_resultado = 12000
+
+[perfiles.local]
+servidor = "localhost"
+base_datos = "master"
+autenticacion = "windows"
+driver = "ODBC Driver 18 for SQL Server"
+confiar_certificado = true
+
+[perfiles.produccion]
+servidor = "SRV-SQL01,1433"
+base_datos = "LrpDB"
+autenticacion = "sql"
+usuario = "sqlpilot_ro"
+# password: SQLPILOT_PERFIL_PRODUCCION_PASSWORD
