@@ -172,9 +172,9 @@ def revisar(perfil: str | None = _OPCION_PERFIL, config: str | None = _OPCION_CO
     """Chequeo rápido de salud sin LLM: hallazgos priorizados en pantalla (para el informe completo usa `informe`)."""
     from sqlpilot.informes.recoleccion import recolectar
 
-    _, conexion = _abrir(perfil, config)
+    cfg, conexion = _abrir(perfil, config)
     with conexion, consola.status("[cyan]Revisando la instancia...[/cyan]", spinner="dots"):
-        datos = recolectar(conexion)
+        datos = recolectar(conexion, paralelismo=cfg.agente.paralelismo_informe)
     if como_json:
         _imprimir(datos, True)
         return
@@ -208,7 +208,8 @@ def informe(
     c = r["hallazgos"]
     rutas = "\n".join(f"[bold]{k.upper()}:[/bold] {v}" for k, v in r["rutas"].items())
     consola.print(Panel(
-        f"[red]{c['alta']} altos[/red] · [yellow]{c['media']} medios[/yellow] · [blue]{c['baja']} bajos[/blue] · {c['info']} no evaluados\n{rutas}",
+        f"[red]{c['alta']} altos[/red] · [yellow]{c['media']} medios[/yellow] · [blue]{c['baja']} bajos[/blue] · {c['info']} no evaluados"
+        f"  [dim]({r['segundos']} s)[/dim]\n{rutas}",
         title="Informe generado", border_style="green"))
     if r.get("resumen_ejecutivo"):
         consola.print(Panel(r["resumen_ejecutivo"], title="Resumen ejecutivo"))

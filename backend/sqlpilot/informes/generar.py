@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,9 +51,14 @@ def generar_informe(
     salida: str | Path | None = None,
     con_resumen_ia: bool = False,
     secciones: list[str] | None = None,
+    paralelismo: int | None = None,
 ) -> dict[str, Any]:
     """Recolecta, renderiza y guarda. Devuelve rutas, conteos y el markdown (para MCP/API)."""
-    informe = recolectar(conexion, secciones)
+    if paralelismo is None:
+        paralelismo = config.agente.paralelismo_informe if config is not None else 4
+    inicio = time.perf_counter()
+    informe = recolectar(conexion, secciones, paralelismo=paralelismo)
+    informe["segundos_recoleccion"] = round(time.perf_counter() - inicio, 1)
     resumen = None
     if con_resumen_ia and config is not None:
         try:
@@ -82,6 +88,7 @@ def generar_informe(
 
     conteo = {s: sum(1 for h in informe["hallazgos"] if h["severidad"] == s) for s in ("alta", "media", "baja", "info")}
     return {"rutas": rutas, "hallazgos": conteo, "total_hallazgos": len(informe["hallazgos"]),
+            "segundos": informe["segundos_recoleccion"],
             "secciones_con_error": [k for k, v in informe["secciones"].items() if v.get("error")],
             "resumen_ejecutivo": resumen, "markdown": markdown, "hallazgos_detalle": informe["hallazgos"]}
 

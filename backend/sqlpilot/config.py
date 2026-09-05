@@ -58,6 +58,8 @@ class PerfilConexion(BaseModel):
     cifrar: bool = True
     timeout_conexion: int = 15
     timeout_consulta: int = 60
+    reintentos: int = 3            # reintentos ante fallos transitorios (Azure exige esta lógica)
+    espera_reintento: float = 0.5  # base del backoff exponencial con jitter, en segundos
 
     def cadena_conexion(self) -> str:
         partes = [
@@ -99,6 +101,7 @@ class ConfigAgente(BaseModel):
     max_caracteres_resultado: int = 12000
     timeout_herramienta: int = 120       # segundos máximos por herramienta (MCP / API)
     conexiones_por_perfil: int = 4       # tamaño del pool para llamadas concurrentes
+    paralelismo_informe: int = 4         # secciones del informe recolectadas en paralelo
 
 
 class Configuracion(BaseModel):

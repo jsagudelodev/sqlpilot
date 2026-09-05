@@ -9,6 +9,7 @@ Copiloto de **diagnóstico y operación para DBAs de SQL Server**. Un agente LLM
 - **Multi-servidor.** Perfiles de conexión (Windows o SQL Auth) en `sqlpilot.toml`.
 - **LLM configurable.** Anthropic (Claude) por defecto; OpenAI u Ollama vía API compatible.
 - **Bitácora.** Todo lo ejecutado queda en `~/.sqlpilot/bitacora.jsonl`.
+- **Resistente a fallos transitorios.** Reintentos con backoff ante failover de Azure SQL, throttling, límites de recursos y cortes de red (reintentar es seguro porque todo es lectura); los errores permanentes —credenciales, permisos, sintaxis— se reportan de inmediato sin reintentar.
 
 ## Herramientas de diagnóstico (fase 1)
 

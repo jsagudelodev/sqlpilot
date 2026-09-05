@@ -42,6 +42,11 @@ Convención: cada ítem se cierra con un commit `feat|fix(scope): ...` y se marc
 
 ## 2. Herramientas de diagnóstico
 
+### P1 — Robustez (hallado en pruebas reales)
+- [x] Reintentos ante fallos transitorios (`db/reintentos.py`): failover de Azure (40613, 40197, 40143), throttling (49918-49920, 10928-10929), cortes de red (08xxx, 10053/10054), deadlock víctima (1205), con backoff exponencial + jitter. Los permanentes (18456, 4060, 229, 207, 102, 10759) no se reintentan para no retrasar el mensaje al DBA. Los timeouts se reintentan solo al conectar. Nada se reintenta tras una cancelación. *(2026-09-05)*
+- [x] Recolección del informe en paralelo (`paralelismo_informe`, default 4): una conexión dedicada por hilo, orden de secciones estable, y caída a modo secuencial si no se pueden abrir conexiones extra. *(2026-09-05)*
+- [ ] Medir el tiempo real del informe en paralelo contra la MI (pendiente: la instancia quedó inaccesible; en serie eran ~70 s).
+
 ### P1 — Permisos y compatibilidad (hallado en Azure SQL MI)
 - [ ] `jobs_fallidos`, `estado_jobs`, `errores_log_sql`: degradan con mensaje, pero falta documentar en README el rol `SQLAgentReaderRole` y `##MS_ServerStateReader##`.
 - [ ] Detectar `EngineEdition` una vez por conexión y adaptar consultas (Azure MI/DB vs. on-prem): `sys.master_files`, `xp_readerrorlog`, `DBCC DBINFO`, `dm_server_services`.

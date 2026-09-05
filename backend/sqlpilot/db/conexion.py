@@ -1,17 +1,24 @@
-"""Conexión a SQL Server vía pyodbc, con sesión endurecida para diagnóstico."""
+"""Conexión a SQL Server vía pyodbc, con sesión endurecida para diagnóstico y
+reintentos ante fallos transitorios (failover de Azure, throttling, cortes de red)."""
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from datetime import time as dt_time
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypeVar
 
 import pyodbc
 
 from sqlpilot.config import PerfilConexion
+from sqlpilot.db.reintentos import es_transitorio, espera_backoff, requiere_reconexion
+
+log = logging.getLogger("sqlpilot.db")
+_T = TypeVar("_T")
 
 # Opciones de sesión: no bloquear al resto del servidor mientras diagnosticamos.
 _SESION_SQL = """
@@ -55,17 +62,39 @@ class ConexionSql:
         self.perfil = perfil
         self._conn: pyodbc.Connection | None = None
         self._cursor_activo: pyodbc.Cursor | None = None
+        self._cancelado = False
+        self.reintentos_usados = 0
 
     def cancelar(self) -> bool:
         """Cancela la sentencia en curso (seguro desde otro hilo). Devuelve True si había algo que cancelar."""
         cursor = self._cursor_activo
         if cursor is None:
             return False
+        self._cancelado = True  # el error resultante no debe reintentarse
         try:
             cursor.cancel()
             return True
         except pyodbc.Error:
             return False
+
+    # ----- reintentos ----------------------------------------------------
+    def _reintentar(self, operacion: Callable[[], _T], descripcion: str, incluir_timeout: bool = False) -> _T:
+        """Ejecuta `operacion` reintentando los fallos transitorios. Seguro porque todo es lectura."""
+        intentos = max(0, self.perfil.reintentos) + 1
+        for intento in range(1, intentos + 1):
+            try:
+                return operacion()
+            except pyodbc.Error as ex:
+                if self._cancelado or intento == intentos or not es_transitorio(ex, incluir_timeout):
+                    raise
+                espera = espera_backoff(intento, self.perfil.espera_reintento)
+                log.warning("Fallo transitorio en %s (intento %d/%d): %s. Reintentando en %.1f s.",
+                            descripcion, intento, intentos, str(ex)[:200], espera)
+                self.reintentos_usados += 1
+                if requiere_reconexion(ex):
+                    self.cerrar()
+                time.sleep(espera)
+        raise RuntimeError("inalcanzable")  # pragma: no cover
 
     def cursor(self) -> pyodbc.Cursor:
         """Cursor rastreado: mientras esté abierto, `cancelar()` puede interrumpirlo."""
@@ -76,9 +105,14 @@ class ConexionSql:
     # ----- ciclo de vida -------------------------------------------------
     def abrir(self) -> ConexionSql:
         if self._conn is None:
-            self._conn = pyodbc.connect(self.perfil.cadena_conexion(), autocommit=True, timeout=self.perfil.timeout_conexion)
-            self._conn.timeout = self.perfil.timeout_consulta
-            self._conn.execute(_SESION_SQL)
+            def conectar() -> pyodbc.Connection:
+                conn = pyodbc.connect(self.perfil.cadena_conexion(), autocommit=True, timeout=self.perfil.timeout_conexion)
+                conn.timeout = self.perfil.timeout_consulta
+                conn.execute(_SESION_SQL)
+                return conn
+
+            # Al conectar sí se reintentan los timeouts: suelen ser cortes de red pasajeros.
+            self._conn = self._reintentar(conectar, f"conexión a {self.perfil.servidor}", incluir_timeout=True)
         return self
 
     def cerrar(self) -> None:
@@ -109,7 +143,18 @@ class ConexionSql:
         max_filas: int | None = 500,
         timeout: int | None = None,
     ) -> ResultadoSql:
-        """Ejecuta SQL y devuelve el primer conjunto de resultados con columnas."""
+        """Ejecuta SQL y devuelve el primer conjunto de resultados con columnas.
+        Reintenta los fallos transitorios (es seguro: SQLPilot solo lee)."""
+        return self._reintentar(lambda: self._ejecutar_consulta(sql, parametros, max_filas, timeout),
+                                f"consulta ({sql.strip()[:60]}...)")
+
+    def _ejecutar_consulta(
+        self,
+        sql: str,
+        parametros: tuple | list | None,
+        max_filas: int | None,
+        timeout: int | None,
+    ) -> ResultadoSql:
         inicio = time.perf_counter()
         mensajes: list[str] = []
         cursor = self.cursor()

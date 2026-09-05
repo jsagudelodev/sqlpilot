@@ -19,6 +19,7 @@ max_filas_resultado = 200
 max_caracteres_resultado = 12000   # recorte por defecto de cada resultado (ajustable por llamada en MCP)
 timeout_herramienta = 120          # segundos máximos por herramienta en MCP/API
 conexiones_por_perfil = 4          # tamaño del pool para llamadas concurrentes
+paralelismo_informe = 4            # secciones del informe recolectadas en paralelo (1 = en serie)
 
 [perfiles.local]
 servidor = "localhost"
@@ -26,6 +27,8 @@ base_datos = "master"
 autenticacion = "windows"
 driver = "ODBC Driver 18 for SQL Server"
 confiar_certificado = true
+# reintentos = 3          # fallos transitorios (failover de Azure, throttling, cortes de red)
+# espera_reintento = 0.5  # base del backoff exponencial, en segundos
 
 [perfiles.produccion]
 servidor = "SRV-SQL01,1433"

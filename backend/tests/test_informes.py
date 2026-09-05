@@ -1,4 +1,8 @@
-from sqlpilot.informes.recoleccion import consolidar_hallazgos
+from typing import ClassVar
+
+from sqlpilot.config import PerfilConexion
+from sqlpilot.informes import recoleccion
+from sqlpilot.informes.recoleccion import SECCIONES, consolidar_hallazgos, recolectar
 from sqlpilot.informes.render import a_html, a_markdown
 
 
@@ -36,6 +40,67 @@ def test_consolidar_hallazgos_prioriza_y_cubre_umbrales():
     assert severidades == sorted(severidades, key=lambda s: {"alta": 0, "media": 1, "baja": 2, "info": 3}[s])
     kill = next(x for x in h if "head blocker" in x["titulo"])
     assert "KILL 57" in kill["script"]
+
+
+class _FakeConexion:
+    """Conexión de prueba: registra aperturas/cierres y hace fallar toda consulta."""
+
+    creadas: ClassVar[list["_FakeConexion"]] = []
+    fallar_al_abrir = False
+
+    def __init__(self, perfil):
+        self.perfil = perfil
+        self.cerrada = False
+
+    def abrir(self):
+        if _FakeConexion.fallar_al_abrir:
+            raise RuntimeError("sin red")
+        _FakeConexion.creadas.append(self)
+        return self
+
+    def cerrar(self):
+        self.cerrada = True
+
+    def info_servidor(self):
+        return {"servidor": "SRV", "base_datos": "db", "engine_edition": 3}
+
+    def consultar(self, *a, **k):
+        raise RuntimeError("sin datos")
+
+    consultar_dicts = consultar
+    escalar = consultar
+    cursor = consultar
+
+
+def _fake(monkeypatch, fallar_al_abrir=False):
+    _FakeConexion.creadas = []
+    _FakeConexion.fallar_al_abrir = fallar_al_abrir
+    monkeypatch.setattr(recoleccion, "ConexionSql", _FakeConexion)
+    return _FakeConexion(PerfilConexion(nombre="t", servidor="x"))
+
+
+def test_recolectar_paralelo_conserva_orden_y_cierra_conexiones(monkeypatch):
+    conexion = _fake(monkeypatch)
+    datos = recolectar(conexion, paralelismo=4)
+    assert list(datos["secciones"]) == [c for c, _, _, _ in SECCIONES]  # orden del informe, no de finalización
+    assert all(sec["error"] for sec in datos["secciones"].values())
+    extras = [c for c in _FakeConexion.creadas if c is not conexion]
+    assert 1 <= len(extras) <= 4  # una conexión dedicada por hilo
+    assert all(c.cerrada for c in extras)  # y todas cerradas al terminar
+
+
+def test_recolectar_cae_a_serie_si_no_puede_paralelizar(monkeypatch):
+    conexion = _fake(monkeypatch, fallar_al_abrir=True)
+    datos = recolectar(conexion, paralelismo=4)
+    assert list(datos["secciones"]) == [c for c, _, _, _ in SECCIONES]
+    assert _FakeConexion.creadas == []  # no se abrió ninguna extra
+
+
+def test_recolectar_secuencial_y_filtrado(monkeypatch):
+    conexion = _fake(monkeypatch)
+    datos = recolectar(conexion, secciones=["esperas", "seguridad"], paralelismo=1)
+    assert list(datos["secciones"]) == ["esperas", "seguridad"]
+    assert _FakeConexion.creadas == []
 
 
 def test_render_markdown_y_html():
