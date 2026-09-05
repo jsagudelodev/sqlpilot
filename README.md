@@ -85,7 +85,9 @@ claude mcp add sqlpilot -s user -- J:/ProyectosGithub/sqlpilot/backend/.venv/Scr
 }
 ```
 
-Los perfiles y credenciales se leen de `backend/.env` y `backend/sqlpilot.toml` (por eso el `cwd`). Cada herramienta acepta `perfil` para elegir servidor.
+Los perfiles y credenciales se leen de `backend/.env` y `backend/sqlpilot.toml` (por eso el `cwd`). Cada herramienta acepta `perfil` para elegir servidor y `max_caracteres` para controlar el tamaño de la respuesta (los resultados largos se recortan y se marcan con `_omitidos_<clave>` / `_recortado`).
+
+Detalles de operación: pool de conexiones por perfil (`[agente] conexiones_por_perfil`, 4 por defecto) para llamadas concurrentes, cada herramienta corre en un hilo con timeout (`[agente] timeout_herramienta`, 120 s), respuestas con `structured_content`, errores como `isError`, logs a stderr.
 
 ## Permisos mínimos recomendados para el login de SQLPilot
 

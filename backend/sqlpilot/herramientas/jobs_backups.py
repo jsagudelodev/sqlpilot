@@ -6,13 +6,6 @@ from sqlpilot.db.conexion import ConexionSql
 from sqlpilot.herramientas.base import herramienta
 
 
-@herramienta(
-    "jobs_fallidos",
-    "Ejecuciones fallidas de jobs del SQL Agent en las últimas N horas, con el mensaje de error del paso.",
-    "jobs",
-    horas="Ventana hacia atrás (por defecto 24).",
-    top="Cantidad a devolver.",
-)
 def _sin_permiso_msdb(ex: Exception) -> dict | None:
     if "permission was denied" in str(ex).lower():
         return {"error": "El login no tiene SELECT sobre las tablas de jobs en msdb.",
@@ -20,11 +13,21 @@ def _sin_permiso_msdb(ex: Exception) -> dict | None:
     return None
 
 
+@herramienta(
+    "jobs_fallidos",
+    "Ejecuciones fallidas de jobs del SQL Agent en las últimas N horas, con el mensaje de error del paso.",
+    "jobs",
+    horas="Ventana hacia atrás (por defecto 24).",
+    top="Cantidad a devolver.",
+)
 def jobs_fallidos(conexion: ConexionSql, horas: int = 24, top: int = 30) -> dict:
     try:
         return _jobs_fallidos(conexion, horas, top)
     except Exception as ex:
-        return _sin_permiso_msdb(ex) or (_ for _ in ()).throw(ex)
+        amigable = _sin_permiso_msdb(ex)
+        if amigable is None:
+            raise
+        return amigable
 
 
 def _jobs_fallidos(conexion: ConexionSql, horas: int, top: int) -> dict:

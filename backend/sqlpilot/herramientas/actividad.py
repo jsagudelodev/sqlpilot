@@ -141,11 +141,12 @@ def transacciones_abiertas(conexion: ConexionSql) -> dict:
 
 @herramienta(
     "detalle_sesion",
-    "Detalle completo de una sesión: login, programa, esperas, transacciones, buffer de entrada y plan actual.",
+    "Detalle completo de una sesión: login, programa, esperas, transacciones, buffer de entrada y resumen del plan actual.",
     "actividad",
     session_id="ID de la sesión (spid).",
+    incluir_xml="Si es true incluye el plan XML crudo (grande); por defecto solo el resumen.",
 )
-def detalle_sesion(conexion: ConexionSql, session_id: int) -> dict:
+def detalle_sesion(conexion: ConexionSql, session_id: int, incluir_xml: bool = False) -> dict:
     sesion = conexion.consultar_dicts(
         """
         SELECT s.session_id, s.login_name, s.host_name, s.program_name, s.client_interface_name,
@@ -183,5 +184,10 @@ def detalle_sesion(conexion: ConexionSql, session_id: int) -> dict:
     )
     detalle = {"sesion": sesion[0], "peticion_actual": peticion[0] if peticion else None, "esperas": esperas}
     if peticion and peticion[0].get("plan_xml"):
-        detalle["peticion_actual"]["plan_xml"] = peticion[0]["plan_xml"][:20000]
+        from sqlpilot.analisis.planes import resumir_plan
+
+        plan_xml = peticion[0].pop("plan_xml")
+        detalle["plan_resumen"] = resumir_plan(plan_xml)
+        if incluir_xml:
+            detalle["plan_xml"] = plan_xml
     return detalle

@@ -8,16 +8,19 @@ Convención: cada ítem se cierra con un commit `feat|fix(scope): ...` y se marc
 ## 1. Servidor MCP
 
 ### P1 — Eficiencia de contexto
-- [ ] Recorte por defecto de resultados grandes (`max_filas`, `max_caracteres`) con aviso `"_omitidos": N` y parámetro para pedir más. Hoy `definicion_objeto` (SPs de 40 KB) o `indices_duplicados` (206 filas en producción) saturan el contexto del cliente.
-- [ ] Devolver `structured_content` con esquema de salida en vez de `str` con JSON embebido.
-- [ ] `detalle_sesion`: devolver el resumen del plan (no hasta 20 KB de XML crudo); XML solo bajo demanda (`incluir_xml=true`).
-- [ ] Errores con `isError=True` en el resultado MCP (hoy van como `{"error": ...}` en texto).
+- [x] Recorte por defecto de resultados grandes (`max_caracteres`, default 12.000, ajustable por llamada) con `_omitidos_<clave>` y `_recortado`. *(2026-09-04)*
+- [x] `structured_content` con esquema de salida (`dict[str, Any]`) en todas las herramientas. *(2026-09-04)*
+- [x] `detalle_sesion`: resumen del plan; XML solo con `incluir_xml=true`. *(2026-09-04)*
+- [x] Errores como `ToolError` → `isError=true` en el cliente. *(2026-09-04)*
+- [ ] Recorte por filas (`max_filas`) además de por caracteres, y recorte de strings largos dentro de listas (hoy solo en el nivel raíz).
 
 ### P1 — Operación del servidor
-- [ ] Pool de conexiones por perfil (o conexión por llamada): una sola conexión pyodbc compartida falla si el cliente lanza herramientas en paralelo.
-- [ ] `esperas_en_ventana` usa `time.sleep`: bloquea el proceso MCP/API. Ejecutar en hilo o `asyncio.sleep`.
-- [ ] Timeout por herramienta y soporte de cancelación/progreso MCP (`fragmentacion_indices` en bases grandes tarda minutos).
-- [ ] Logging a stderr con nivel configurable (stdio exige no tocar stdout) y `notifications/message` al cliente.
+- [x] Pool de conexiones por perfil (`db/pool.py`, `conexiones_por_perfil`, default 4); probado con 6 herramientas en paralelo contra Azure MI. *(2026-09-04)*
+- [x] Herramientas ejecutadas en hilo (`anyio.to_thread`): `esperas_en_ventana` ya no bloquea el resto. *(2026-09-04)*
+- [x] Timeout por herramienta (`timeout_herramienta`, default 120 s). *(2026-09-04)*
+- [ ] Cancelación/progreso MCP: el timeout responde al cliente pero el hilo sigue hasta que pyodbc corta por `timeout_consulta`.
+- [x] Logging a stderr con nivel configurable. *(2026-09-04)*
+- [ ] `notifications/message` al cliente.
 
 ### P2 — Prompts y resources
 - [ ] Prompts: `diagnosticar_bloqueos`, `revisar_indices_tabla(tabla)`, `explicar_deadlock`, `comparar_antes_ahora`.

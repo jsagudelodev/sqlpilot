@@ -16,7 +16,9 @@ autenticacion = "windows"
 
 [agente]
 max_filas_resultado = 200
-max_caracteres_resultado = 12000
+max_caracteres_resultado = 12000   # recorte por defecto de cada resultado (ajustable por llamada en MCP)
+timeout_herramienta = 120          # segundos máximos por herramienta en MCP/API
+conexiones_por_perfil = 4          # tamaño del pool para llamadas concurrentes
 
 [perfiles.local]
 servidor = "localhost"

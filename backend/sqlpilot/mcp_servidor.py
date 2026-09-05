@@ -2,21 +2,35 @@
 (Claude Code, Claude Desktop, Cursor, VS Code...). Solo lectura, igual que la CLI.
 
 Arranque: `sqlpilot mcp` (stdio) o `sqlpilot mcp --http --puerto 8765`.
+
+Diseño:
+- Cada herramienta corre en un hilo (no bloquea el bucle de eventos) con timeout.
+- Pool de conexiones por perfil: llamadas concurrentes no comparten conexión pyodbc.
+- Resultados recortados a `max_caracteres` (con `_omitidos`) para no saturar el contexto del cliente.
+- Errores como `ToolError` → el cliente recibe `isError=true`.
+- Logging a stderr (stdout es el canal del protocolo en stdio).
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import logging
+import sys
 from typing import Any
 
+import anyio
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from sqlpilot import __version__
 from sqlpilot.config import Configuracion, cargar_configuracion
-from sqlpilot.db.conexion import ConexionSql
+from sqlpilot.db.pool import PoolConexiones
 from sqlpilot.herramientas import REGISTRO, Herramienta
+
+log = logging.getLogger("sqlpilot.mcp")
 
 INSTRUCCIONES = """SQLPilot: herramientas de diagnóstico y operación para DBAs de SQL Server. SOLO LECTURA.
 
@@ -30,71 +44,90 @@ Metodología recomendada:
 - "Antes funcionaba bien": regresiones_query_store → comparar_planes_query_store; o tomar_snapshot en un momento
   normal y comparar_snapshots durante el problema.
 - "¿Las estimaciones están mal?": plan_real (solo SELECT o SP de lectura pura; se ejecuta con ROLLBACK).
-Todas las herramientas aceptan `perfil` (nombre del perfil de conexión; ver listar_perfiles). Si se omite se usa el
-perfil por defecto. Ninguna herramienta escribe en el servidor: KILL, índices, estadísticas o configuración se
-devuelven como scripts para que el DBA los ejecute él mismo (usa proponer_accion para dejarlos registrados).
+Todas las herramientas aceptan `perfil` (ver listar_perfiles; si se omite, el default) y `max_caracteres`
+(los resultados largos se recortan y se marca `_omitidos`; súbelo si necesitas más detalle).
+Ninguna herramienta escribe en el servidor: KILL, índices, estadísticas o configuración se devuelven como
+scripts para que el DBA los ejecute él mismo (usa proponer_accion para dejarlos registrados).
 """
 
 _SOLO_LECTURA = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
 
-class _Conexiones:
-    """Una conexión viva por perfil, abierta bajo demanda."""
+# --------------------------------------------------------------------------- recorte
+def recortar(resultado: Any, max_caracteres: int) -> Any:
+    """Recorta listas largas dentro del resultado hasta que su JSON quepa en `max_caracteres`.
+    Añade `_omitidos_<clave>` con la cantidad de elementos descartados y `_recortado: true`."""
+    texto = json.dumps(resultado, ensure_ascii=False, default=str)
+    if len(texto) <= max_caracteres or not isinstance(resultado, dict):
+        if isinstance(resultado, list) and len(texto) > max_caracteres:
+            n = max(1, len(resultado) * max_caracteres // len(texto))
+            return {"elementos": resultado[:n], "_omitidos": len(resultado) - n, "_recortado": True}
+        return resultado
+    recortado = dict(resultado)
+    listas = sorted(
+        ((k, v) for k, v in resultado.items() if isinstance(v, list) and len(v) > 1),
+        key=lambda kv: len(json.dumps(kv[1], default=str)),
+        reverse=True,
+    )
+    factor = max_caracteres / len(texto)
+    for k, v in listas:
+        n = max(1, int(len(v) * factor))
+        if n < len(v):
+            recortado[k] = v[:n]
+            recortado[f"_omitidos_{k}"] = len(v) - n
+    recortado["_recortado"] = True
+    texto = json.dumps(recortado, ensure_ascii=False, default=str)
+    if len(texto) > max_caracteres:
+        # Sigue grande (strings enormes, p. ej. una definición): recortar strings largos.
+        for k, v in list(recortado.items()):
+            if isinstance(v, str) and len(v) > 2000:
+                recortado[k] = v[: max(2000, max_caracteres // 2)] + f"... [{len(v) - max_caracteres // 2} caracteres omitidos]"
+    return recortado
 
-    def __init__(self, config: Configuracion):
-        self.config = config
-        self._abiertas: dict[str, ConexionSql] = {}
 
-    def obtener(self, perfil: str | None) -> ConexionSql:
-        p = self.config.perfil(perfil)
-        conexion = self._abiertas.get(p.nombre)
-        if conexion is None:
-            conexion = ConexionSql(p).abrir()
-            self._abiertas[p.nombre] = conexion
-        else:
-            try:
-                conexion.escalar("SELECT 1")
-            except Exception:  # conexión caída: reabrir
-                conexion.cerrar()
-                conexion = ConexionSql(p).abrir()
-                self._abiertas[p.nombre] = conexion
-        return conexion
-
-    def cerrar_todas(self) -> None:
-        for c in self._abiertas.values():
-            c.cerrar()
-        self._abiertas.clear()
-
-
-def _a_json(valor: Any) -> str:
-    return json.dumps(valor, ensure_ascii=False, default=str)
-
-
-def _envolver(herramienta: Herramienta, conexiones: _Conexiones):
-    """Crea una función con la firma de la herramienta (sin `conexion`) más `perfil`, para que
-    el SDK MCP derive el JSON Schema de los parámetros."""
+# --------------------------------------------------------------------------- wrapper
+def _envolver(herramienta: Herramienta, pool: PoolConexiones, config: Configuracion):
+    """Crea una función async con la firma de la herramienta (sin `conexion`) más `perfil` y
+    `max_caracteres`, para que el SDK MCP derive el JSON Schema; ejecuta en hilo con timeout."""
     firma_original = inspect.signature(herramienta.funcion)
     parametros = [p for n, p in firma_original.parameters.items() if n != "conexion"]
-    parametros.append(inspect.Parameter("perfil", inspect.Parameter.KEYWORD_ONLY, default=None, annotation="str | None"))
-    firma = inspect.Signature(parametros, return_annotation=str)
+    parametros.append(inspect.Parameter("perfil", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=str | None))
+    parametros.append(inspect.Parameter("max_caracteres", inspect.Parameter.KEYWORD_ONLY,
+                                        default=config.agente.max_caracteres_resultado, annotation=int))
+    firma = inspect.Signature(parametros, return_annotation=dict[str, Any])
 
-    def wrapper(*args: Any, **kwargs: Any) -> str:
+    async def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
         enlazados = firma.bind(*args, **kwargs)
         enlazados.apply_defaults()
         argumentos = dict(enlazados.arguments)
         perfil = argumentos.pop("perfil", None)
+        max_caracteres = int(argumentos.pop("max_caracteres"))
+
+        def ejecutar() -> Any:
+            with pool.tomar(perfil) as conexion:
+                return herramienta.invocar(conexion, **argumentos)
+
+        log.info("-> %s(%s) perfil=%s", herramienta.nombre, ", ".join(f"{k}={v!r}" for k, v in argumentos.items())[:200], perfil)
         try:
-            conexion = conexiones.obtener(perfil)
-            return _a_json(herramienta.invocar(conexion, **argumentos))
-        except Exception as ex:  # el error vuelve al modelo como dato, no como fallo del protocolo
-            return _a_json({"error": f"{type(ex).__name__}: {str(ex)[:2000]}"})
+            resultado = await asyncio.wait_for(anyio.to_thread.run_sync(ejecutar), timeout=config.agente.timeout_herramienta)
+        except TimeoutError as ex:
+            raise ToolError(f"{herramienta.nombre} superó el tiempo máximo de {config.agente.timeout_herramienta} s.") from ex
+        except TypeError as ex:
+            raise ToolError(f"Argumentos inválidos para {herramienta.nombre}: {ex}") from ex
+        except Exception as ex:
+            log.warning("ERROR %s: %s", herramienta.nombre, ex)
+            raise ToolError(f"{type(ex).__name__}: {str(ex)[:2000]}") from ex
+        if isinstance(resultado, dict) and "error" in resultado and len(resultado) <= 3:
+            raise ToolError(str(resultado["error"]))
+        recortado = recortar(resultado, max_caracteres)
+        return recortado if isinstance(recortado, dict) else {"resultado": recortado}
 
     wrapper.__name__ = herramienta.nombre
     wrapper.__qualname__ = herramienta.nombre
     wrapper.__doc__ = herramienta.descripcion
     wrapper.__signature__ = firma  # type: ignore[attr-defined]
     anotaciones = {p.name: p.annotation for p in parametros if p.annotation is not inspect.Parameter.empty}
-    anotaciones["return"] = str
+    anotaciones["return"] = dict[str, Any]
     wrapper.__annotations__ = anotaciones
     return wrapper
 
@@ -104,13 +137,14 @@ def _describir(herramienta: Herramienta) -> str:
     props = herramienta.parametros.get("properties", {})
     if props:
         detalles = "; ".join(f"{n}: {p.get('description', '')}".rstrip(": ") for n, p in props.items())
-        texto += f" Parámetros — {detalles}. perfil: perfil de conexión (opcional)."
+        texto += f" Parámetros — {detalles}."
     return texto
 
 
+# --------------------------------------------------------------------------- servidor
 def crear_servidor(config: Configuracion | None = None) -> MCPServer:
     config = config or cargar_configuracion()
-    conexiones = _Conexiones(config)
+    pool = PoolConexiones(config, maximo=config.agente.conexiones_por_perfil)
     servidor = MCPServer(
         name="sqlpilot",
         title="SQLPilot — DBA copilot para SQL Server",
@@ -119,35 +153,42 @@ def crear_servidor(config: Configuracion | None = None) -> MCPServer:
     )
 
     for h in REGISTRO.values():
-        servidor.add_tool(_envolver(h, conexiones), name=h.nombre, description=_describir(h), annotations=_SOLO_LECTURA)
+        servidor.add_tool(_envolver(h, pool, config), name=h.nombre, description=_describir(h),
+                          annotations=_SOLO_LECTURA, structured_output=True)
 
-    @servidor.tool(name="listar_perfiles", description="Perfiles de conexión configurados en SQLPilot y cuál es el default.",
-                   annotations=_SOLO_LECTURA)
-    def listar_perfiles() -> str:
-        return _a_json({
+    def _perfiles() -> dict[str, Any]:
+        return {
             "default": config.perfil_default or (next(iter(config.perfiles)) if len(config.perfiles) == 1 else None),
             "perfiles": [{"nombre": n, "servidor": p.servidor, "base_datos": p.base_datos, "autenticacion": p.autenticacion}
                          for n, p in config.perfiles.items()],
             "archivo": str(config.ruta_archivo) if config.ruta_archivo else None,
-        })
+        }
+
+    @servidor.tool(name="listar_perfiles", description="Perfiles de conexión configurados en SQLPilot y cuál es el default.",
+                   annotations=_SOLO_LECTURA, structured_output=True)
+    def listar_perfiles() -> dict[str, Any]:
+        return _perfiles()
 
     @servidor.tool(name="info_servidor", description="Prueba la conexión de un perfil y devuelve versión, edición, login y bases online.",
-                   annotations=_SOLO_LECTURA)
-    def info_servidor(perfil: str | None = None) -> str:
+                   annotations=_SOLO_LECTURA, structured_output=True)
+    async def info_servidor(perfil: str | None = None) -> dict[str, Any]:
+        def ejecutar() -> dict[str, Any]:
+            with pool.tomar(perfil) as c:
+                return c.info_servidor()
         try:
-            return _a_json(conexiones.obtener(perfil).info_servidor())
+            return await asyncio.wait_for(anyio.to_thread.run_sync(ejecutar), timeout=config.agente.timeout_herramienta)
         except Exception as ex:
-            return _a_json({"error": str(ex)})
+            raise ToolError(f"No se pudo conectar: {ex}") from ex
 
     @servidor.tool(name="catalogo_herramientas", description="Lista las herramientas de SQLPilot por categoría con sus parámetros.",
-                   annotations=_SOLO_LECTURA)
-    def catalogo_herramientas() -> str:
-        return _a_json([{"categoria": h.categoria, "nombre": h.nombre, "parametros": list(h.parametros.get("properties", {}))}
-                        for h in REGISTRO.values()])
+                   annotations=_SOLO_LECTURA, structured_output=True)
+    def catalogo_herramientas() -> dict[str, Any]:
+        return {"herramientas": [{"categoria": h.categoria, "nombre": h.nombre, "parametros": list(h.parametros.get("properties", {}))}
+                                 for h in REGISTRO.values()]}
 
     @servidor.resource("sqlpilot://perfiles", name="perfiles", description="Perfiles de conexión configurados.", mime_type="application/json")
     def recurso_perfiles() -> str:
-        return listar_perfiles()
+        return json.dumps(_perfiles(), ensure_ascii=False)
 
     @servidor.prompt(name="diagnostico_lentitud", description="Guía paso a paso para diagnosticar 'el servidor está lento'.")
     def prompt_lentitud(perfil: str | None = None) -> str:
@@ -180,15 +221,23 @@ def crear_servidor(config: Configuracion | None = None) -> MCPServer:
         return (
             f"Haz una revisión de salud de la instancia{p}: configuracion_instancia, configuracion_bases_datos, "
             "estado_backups, espacio_bases_datos, estado_tempdb, jobs_fallidos, errores_log_sql, deadlocks_recientes, "
-            "esperas_acumuladas. Prioriza los hallazgos por riesgo (pérdida de datos > disponibilidad > rendimiento) "
-            "y entrega un plan de acción con scripts propuestos."
+            "integridad_bases_datos, auditoria_seguridad, esperas_acumuladas. Prioriza los hallazgos por riesgo "
+            "(pérdida de datos > seguridad > disponibilidad > rendimiento) y entrega un plan de acción con scripts propuestos."
         )
 
+    servidor._pool_sqlpilot = pool  # type: ignore[attr-defined]  (para cerrar en pruebas)
     return servidor
 
 
-def ejecutar(transporte: str = "stdio", host: str = "127.0.0.1", puerto: int = 8765) -> None:
+def configurar_logging(nivel: str = "INFO") -> None:
+    logging.basicConfig(stream=sys.stderr, level=getattr(logging, nivel.upper(), logging.INFO),
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def ejecutar(transporte: str = "stdio", host: str = "127.0.0.1", puerto: int = 8765, nivel_log: str = "INFO") -> None:
+    configurar_logging(nivel_log)
     servidor = crear_servidor()
+    log.info("SQLPilot MCP %s · %d herramientas · transporte %s", __version__, len(REGISTRO) + 3, transporte)
     if transporte == "stdio":
         servidor.run(transport="stdio")
     else:

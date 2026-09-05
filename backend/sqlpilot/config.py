@@ -97,6 +97,8 @@ class ConfigLLM(BaseModel):
 class ConfigAgente(BaseModel):
     max_filas_resultado: int = 200
     max_caracteres_resultado: int = 12000
+    timeout_herramienta: int = 120       # segundos máximos por herramienta (MCP / API)
+    conexiones_por_perfil: int = 4       # tamaño del pool para llamadas concurrentes
 
 
 class Configuracion(BaseModel):
