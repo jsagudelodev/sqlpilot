@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -168,44 +169,53 @@ def sql(
 
 @app.command()
 def revisar(perfil: str | None = _OPCION_PERFIL, config: str | None = _OPCION_CONFIG, como_json: bool = typer.Option(False, "--json")) -> None:
-    """Chequeo rápido de salud sin LLM: configuración, backups, espacio, bloqueos, esperas."""
-    from sqlpilot.herramientas import REGISTRO
+    """Chequeo rápido de salud sin LLM: hallazgos priorizados en pantalla (para el informe completo usa `informe`)."""
+    from sqlpilot.informes.recoleccion import recolectar
 
     _, conexion = _abrir(perfil, config)
-    with conexion:
-        informe: dict[str, Any] = {}
-        for nombre in ("configuracion_instancia", "configuracion_bases_datos", "estado_backups", "espacio_bases_datos",
-                       "cadena_bloqueos", "esperas_acumuladas", "jobs_fallidos"):
-            try:
-                informe[nombre] = REGISTRO[nombre].invocar(conexion)
-            except Exception as ex:
-                informe[nombre] = {"error": str(ex)}
+    with conexion, consola.status("[cyan]Revisando la instancia...[/cyan]", spinner="dots"):
+        datos = recolectar(conexion)
     if como_json:
-        _imprimir(informe, True)
+        _imprimir(datos, True)
         return
-    hallazgos = []
-    for origen in ("configuracion_instancia", "configuracion_bases_datos"):
-        for h in informe.get(origen, {}).get("hallazgos", []) or []:
-            hallazgos.append({"severidad": h.get("severidad"), "origen": origen, "titulo": h.get("titulo"),
-                              "base_datos": h.get("base_datos", ""), "script": h.get("script", "")})
-    for b in informe.get("estado_backups", {}).get("backups", []) or []:
-        if b.get("alerta"):
-            hallazgos.append({"severidad": "alta", "origen": "backups", "titulo": b["alerta"], "base_datos": b["base_datos"], "script": ""})
-        if b.get("horas_desde_full") is None or (b.get("horas_desde_full") or 0) > 48:
-            hallazgos.append({"severidad": "alta", "origen": "backups", "titulo": "Sin backup FULL en > 48 h", "base_datos": b["base_datos"], "script": ""})
-    for d in informe.get("espacio_bases_datos", {}).get("bases_datos", []) or []:
-        if (d.get("log_usado_pct") or 0) > 80:
-            hallazgos.append({"severidad": "alta", "origen": "espacio", "titulo": f"Log al {d['log_usado_pct']}% ({d['log_reuse_wait']})", "base_datos": d["base_datos"], "script": ""})
-    hb = informe.get("cadena_bloqueos", {}).get("head_blockers", []) or []
-    if hb:
-        hallazgos.append({"severidad": "alta", "origen": "bloqueos", "titulo": f"{len(hb)} head blocker(s) activos: spids {[h['head_blocker'] for h in hb]}", "base_datos": "", "script": ""})
-    jf = informe.get("jobs_fallidos", {}).get("fallos", []) or []
-    if jf:
-        hallazgos.append({"severidad": "media", "origen": "jobs", "titulo": f"{len(jf)} fallos de jobs en 24 h: {sorted({j['job'] for j in jf})[:5]}", "base_datos": "", "script": ""})
-    orden = {"alta": 0, "media": 1, "baja": 2}
-    hallazgos.sort(key=lambda h: orden.get(h["severidad"], 9))
+    hallazgos = [{"sev": h["severidad"], "area": h["area"], "titulo": h["titulo"], "base_datos": h["base_datos"]}
+                 for h in datos["hallazgos"] if h["severidad"] != "info"]
     _tabla(hallazgos, f"Hallazgos ({len(hallazgos)})", max_ancho=90)
-    _tabla(informe.get("esperas_acumuladas", {}).get("esperas", [])[:8], "Top esperas acumuladas")
+    no_eval = [h["titulo"] for h in datos["hallazgos"] if h["severidad"] == "info"]
+    if no_eval:
+        consola.print(f"[dim]No evaluado ({len(no_eval)}): {'; '.join(no_eval)[:300]}[/dim]")
+    esperas = (datos["secciones"].get("esperas", {}).get("datos") or {}).get("esperas", [])
+    _tabla(esperas[:8], "Top esperas acumuladas")
+    consola.print("[dim]Informe completo con scripts: sqlpilot informe[/dim]")
+
+
+@app.command()
+def informe(
+    perfil: str | None = _OPCION_PERFIL,
+    config: str | None = _OPCION_CONFIG,
+    formato: str = typer.Option("ambos", help="html | md | json | ambos (html+md) | todos."),
+    salida: str | None = typer.Option(None, "--salida", "-o", help="Ruta base del archivo (sin extensión). Por defecto ~/.sqlpilot/informes/."),
+    resumen_ia: bool = typer.Option(False, "--resumen-ia", help="Agrega un resumen ejecutivo generado con el LLM configurado."),
+    abrir: bool = typer.Option(False, "--abrir", help="Abre el HTML en el navegador al terminar."),
+) -> None:
+    """Informe de salud exportable (HTML imprimible a PDF + Markdown) con hallazgos priorizados y scripts."""
+    from sqlpilot.informes.generar import generar_informe
+
+    formatos = {"ambos": ("html", "md"), "todos": ("html", "md", "json")}.get(formato, (formato,))
+    cfg, conexion = _abrir(perfil, config)
+    with conexion, consola.status("[cyan]Generando informe...[/cyan]", spinner="dots"):
+        r = generar_informe(conexion, cfg, formatos=formatos, salida=salida, con_resumen_ia=resumen_ia)
+    c = r["hallazgos"]
+    rutas = "\n".join(f"[bold]{k.upper()}:[/bold] {v}" for k, v in r["rutas"].items())
+    consola.print(Panel(
+        f"[red]{c['alta']} altos[/red] · [yellow]{c['media']} medios[/yellow] · [blue]{c['baja']} bajos[/blue] · {c['info']} no evaluados\n{rutas}",
+        title="Informe generado", border_style="green"))
+    if r.get("resumen_ejecutivo"):
+        consola.print(Panel(r["resumen_ejecutivo"], title="Resumen ejecutivo"))
+    if abrir and "html" in r["rutas"]:
+        import webbrowser
+
+        webbrowser.open(Path(r["rutas"]["html"]).as_uri())
 
 
 @app.command()

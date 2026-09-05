@@ -18,9 +18,10 @@ Convención: cada ítem se cierra con un commit `feat|fix(scope): ...` y se marc
 - [x] Pool de conexiones por perfil (`db/pool.py`, `conexiones_por_perfil`, default 4); probado con 6 herramientas en paralelo contra Azure MI. *(2026-09-04)*
 - [x] Herramientas ejecutadas en hilo (`anyio.to_thread`): `esperas_en_ventana` ya no bloquea el resto. *(2026-09-04)*
 - [x] Timeout por herramienta (`timeout_herramienta`, default 120 s). *(2026-09-04)*
-- [ ] Cancelación/progreso MCP: el timeout responde al cliente pero el hilo sigue hasta que pyodbc corta por `timeout_consulta`.
+- [x] Cancelación real: en timeout o cancelación del cliente se llama `cursor.cancel()` sobre la conexión en uso (`ConexionSql.cancelar`); probado contra Azure MI: la consulta pesada desaparece del servidor y la conexión vuelve al pool usable. *(2026-09-04)*
 - [x] Logging a stderr con nivel configurable. *(2026-09-04)*
-- [ ] `notifications/message` al cliente.
+- [x] Notificaciones al cliente vía `Context.report_progress` con mensaje (inicio, recorte aplicado, timeout, error). La capacidad `logging` (`notifications/message`) quedó deprecada en la spec MCP (SEP-2577), por eso no se usa. *(2026-09-04)*
+- [ ] Progreso intermedio en herramientas largas (`esperas_en_ventana` por segundo, `fragmentacion_indices` por tabla).
 
 ### P2 — Prompts y resources
 - [ ] Prompts: `diagnosticar_bloqueos`, `revisar_indices_tabla(tabla)`, `explicar_deadlock`, `comparar_antes_ahora`.
@@ -60,7 +61,9 @@ Convención: cada ítem se cierra con un commit `feat|fix(scope): ...` y se marc
 
 ### P3
 - [ ] Alertas sobre snapshots (umbrales: PLE, log %, backups, bloqueos) con salida para cron/Task Scheduler.
-- [ ] Exportar hallazgos a Markdown/HTML (informe de salud entregable).
+- [x] Exportar hallazgos a Markdown/HTML (informe de salud entregable): `sqlpilot informe`, herramienta `generar_informe_salud`, `sqlpilot/informes/`. HTML autocontenido imprimible a PDF; resumen ejecutivo opcional con el LLM. Probado contra Azure MI (46 hallazgos). *(2026-09-05)*
+- [ ] PDF nativo (sin pasar por el navegador) si algún cliente lo exige; hoy: HTML → Imprimir → PDF.
+- [ ] Informe diferencial: comparar dos informes/snapshots y reportar solo lo que cambió.
 
 ---
 

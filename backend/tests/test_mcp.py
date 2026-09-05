@@ -26,6 +26,7 @@ def test_esquema_conserva_parametros_y_agrega_perfil_y_recorte():
     tools = {t.name: t for t in asyncio.run(servidor.list_tools())}
     props = tools["detalle_sesion"].input_schema["properties"]
     assert {"session_id", "perfil", "max_caracteres"} <= set(props)
+    assert "ctx" not in props  # lo inyecta el SDK, no el cliente
     assert tools["detalle_sesion"].input_schema["required"] == ["session_id"]
     assert tools["detalle_sesion"].output_schema is not None
 

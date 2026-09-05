@@ -10,6 +10,7 @@ from sqlpilot.herramientas import (  # noqa: F401  (registro por efecto secundar
     esquema,
     estadisticas,
     indices,
+    informe,
     jobs_backups,
     planes_qs,
     seguridad_instancia,

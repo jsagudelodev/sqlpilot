@@ -27,6 +27,7 @@ Copiloto de **diagnóstico y operación para DBAs de SQL Server**. Un agente LLM
 | SQL / operación | `ejecutar_sql_lectura`, `proponer_accion` |
 | **Planes (fase 2)** | `regresiones_query_store`, `planes_de_consulta_query_store`, `comparar_planes_query_store`, `comparar_plan_estimado`, `plan_real` (SELECT o SP de lectura pura, dentro de transacción con ROLLBACK), `plan_cache_salud` |
 | **Histórico (fase 2)** | `tomar_snapshot`, `listar_snapshots`, `comparar_snapshots` — "antes vs. ahora" de esperas, top queries, tamaños, I/O y contadores |
+| **Informes** | `generar_informe_salud` — informe completo (21 secciones) con hallazgos priorizados y scripts, en HTML imprimible a PDF y Markdown; `sqlpilot informe --resumen-ia` agrega un resumen ejecutivo para no técnicos |
 | **Seguridad / integridad (fase 2)** | `auditoria_seguridad` (sysadmin, sa, contraseñas débiles, CONTROL SERVER, TRUSTWORTHY, huérfanos, guest), `integridad_bases_datos` (último CHECKDB, suspect_pages) |
 
 ## Instalación
@@ -46,7 +47,8 @@ set ANTHROPIC_API_KEY=sk-ant-...
 ```bash
 sqlpilot perfiles                              # perfiles configurados
 sqlpilot salud -p produccion                   # prueba de conexión
-sqlpilot revisar -p produccion                 # chequeo de salud sin LLM (config, backups, log, bloqueos, esperas)
+sqlpilot revisar -p produccion                 # chequeo de salud sin LLM: hallazgos priorizados en pantalla
+sqlpilot informe -p produccion --resumen-ia --abrir   # informe exportable HTML (imprimible a PDF) + Markdown con scripts
 sqlpilot herramientas                          # catálogo de herramientas
 sqlpilot ejecutar esperas_en_ventana segundos=5 -p produccion
 sqlpilot ejecutar definicion_objeto nombre=dbo.spLRP_Despachos_Listar --json

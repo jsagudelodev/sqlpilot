@@ -164,7 +164,7 @@ def plan_estimado(conexion: ConexionSql, sql: str) -> dict:
     es_exec_sp = sql_limpio.lower().startswith(("exec ", "execute ")) and "sp_executesql" not in sql_limpio.lower()
     if not es_exec_sp and not evaluar_sql(sql).permitido:
         return {"error": evaluar_sql(sql).motivo}
-    cursor = conexion.conn.cursor()
+    cursor = conexion.cursor()
     try:
         cursor.execute("SET SHOWPLAN_XML ON")
         cursor.execute(sql)

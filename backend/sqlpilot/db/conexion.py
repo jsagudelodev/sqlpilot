@@ -54,6 +54,24 @@ class ConexionSql:
     def __init__(self, perfil: PerfilConexion):
         self.perfil = perfil
         self._conn: pyodbc.Connection | None = None
+        self._cursor_activo: pyodbc.Cursor | None = None
+
+    def cancelar(self) -> bool:
+        """Cancela la sentencia en curso (seguro desde otro hilo). Devuelve True si había algo que cancelar."""
+        cursor = self._cursor_activo
+        if cursor is None:
+            return False
+        try:
+            cursor.cancel()
+            return True
+        except pyodbc.Error:
+            return False
+
+    def cursor(self) -> pyodbc.Cursor:
+        """Cursor rastreado: mientras esté abierto, `cancelar()` puede interrumpirlo."""
+        cursor = self.conn.cursor()
+        self._cursor_activo = cursor
+        return cursor
 
     # ----- ciclo de vida -------------------------------------------------
     def abrir(self) -> ConexionSql:
@@ -94,7 +112,7 @@ class ConexionSql:
         """Ejecuta SQL y devuelve el primer conjunto de resultados con columnas."""
         inicio = time.perf_counter()
         mensajes: list[str] = []
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         if timeout is not None:
             self.conn.timeout = timeout
         try:
@@ -121,6 +139,7 @@ class ConexionSql:
                 mensajes.append(str(m[1]))
             return ResultadoSql(columnas, filas, len(filas), truncado, _ms(inicio), None, mensajes)
         finally:
+            self._cursor_activo = None
             cursor.close()
             if timeout is not None:
                 self.conn.timeout = self.perfil.timeout_consulta

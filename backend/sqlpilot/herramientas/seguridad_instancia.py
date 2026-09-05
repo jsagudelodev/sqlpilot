@@ -146,7 +146,7 @@ def integridad_bases_datos(conexion: ConexionSql, max_dias: int = 7) -> dict:
         "SELECT name FROM sys.databases WHERE state_desc = 'ONLINE' AND name <> 'tempdb' AND HAS_DBACCESS(name) = 1", max_filas=None)
     es_azure = conexion.escalar("SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT)") in (5, 8)
     resultado = []
-    cursor = conexion.conn.cursor()
+    cursor = conexion.cursor()
     try:
         for b in bases:
             nombre = b["name"].replace("]", "]]")

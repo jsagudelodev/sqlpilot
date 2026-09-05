@@ -117,7 +117,7 @@ def estado_backups(conexion: ConexionSql) -> dict:
     top="Cantidad de entradas.",
 )
 def errores_log_sql(conexion: ConexionSql, horas: int = 24, top: int = 50) -> dict:
-    cursor = conexion.conn.cursor()
+    cursor = conexion.cursor()
     try:
         cursor.execute("CREATE TABLE #log (fecha DATETIME, proceso NVARCHAR(100), texto NVARCHAR(MAX));")
         cursor.execute("INSERT INTO #log EXEC xp_readerrorlog 0, 1;")

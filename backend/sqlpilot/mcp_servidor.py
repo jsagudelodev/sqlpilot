@@ -21,7 +21,7 @@ import sys
 from typing import Any
 
 import anyio
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
@@ -44,6 +44,7 @@ Metodología recomendada:
 - "Antes funcionaba bien": regresiones_query_store → comparar_planes_query_store; o tomar_snapshot en un momento
   normal y comparar_snapshots durante el problema.
 - "¿Las estimaciones están mal?": plan_real (solo SELECT o SP de lectura pura; se ejecuta con ROLLBACK).
+- "Dame un informe / algo para entregar": generar_informe_salud (HTML imprimible + Markdown en ~/.sqlpilot/informes).
 Todas las herramientas aceptan `perfil` (ver listar_perfiles; si se omite, el default) y `max_caracteres`
 (los resultados largos se recortan y se marca `_omitidos`; súbelo si necesitas más detalle).
 Ninguna herramienta escribe en el servidor: KILL, índices, estadísticas o configuración se devuelven como
@@ -86,6 +87,21 @@ def recortar(resultado: Any, max_caracteres: int) -> Any:
 
 
 # --------------------------------------------------------------------------- wrapper
+async def _avisar(ctx: Context | None, nivel: str, mensaje: str, progreso: float = 0.0, total: float | None = None) -> None:
+    """Notifica al cliente sin romper la herramienta.
+
+    Usa `notifications/progress` con mensaje (la capacidad `logging` quedó deprecada en la
+    especificación MCP, SEP-2577). Solo llega si el cliente envió progressToken; si no, es no-op.
+    """
+    getattr(log, nivel if nivel in ("debug", "info", "warning", "error") else "info")(mensaje)
+    if ctx is None:
+        return
+    try:
+        await ctx.report_progress(progreso, total, message=mensaje)
+    except Exception as ex:  # sin request context (llamada in-process) o sesión cerrada
+        log.debug("No se pudo notificar al cliente: %s", ex)
+
+
 def _envolver(herramienta: Herramienta, pool: PoolConexiones, config: Configuracion):
     """Crea una función async con la firma de la herramienta (sin `conexion`) más `perfil` y
     `max_caracteres`, para que el SDK MCP derive el JSON Schema; ejecuta en hilo con timeout."""
@@ -94,7 +110,10 @@ def _envolver(herramienta: Herramienta, pool: PoolConexiones, config: Configurac
     parametros.append(inspect.Parameter("perfil", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=str | None))
     parametros.append(inspect.Parameter("max_caracteres", inspect.Parameter.KEYWORD_ONLY,
                                         default=config.agente.max_caracteres_resultado, annotation=int))
+    # `ctx` lo inyecta el SDK (no aparece en el esquema): sirve para logs al cliente y progreso.
+    parametros.append(inspect.Parameter("ctx", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Context | None))
     firma = inspect.Signature(parametros, return_annotation=dict[str, Any])
+    timeout = config.agente.timeout_herramienta
 
     async def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
         enlazados = firma.bind(*args, **kwargs)
@@ -102,24 +121,47 @@ def _envolver(herramienta: Herramienta, pool: PoolConexiones, config: Configurac
         argumentos = dict(enlazados.arguments)
         perfil = argumentos.pop("perfil", None)
         max_caracteres = int(argumentos.pop("max_caracteres"))
+        ctx: Context | None = argumentos.pop("ctx", None)
+        en_curso: dict[str, Any] = {}  # la conexión que usa el hilo, para poder cancelarla desde aquí
 
         def ejecutar() -> Any:
             with pool.tomar(perfil) as conexion:
-                return herramienta.invocar(conexion, **argumentos)
+                en_curso["conexion"] = conexion
+                try:
+                    return herramienta.invocar(conexion, **argumentos)
+                finally:
+                    en_curso.pop("conexion", None)
 
-        log.info("-> %s(%s) perfil=%s", herramienta.nombre, ", ".join(f"{k}={v!r}" for k, v in argumentos.items())[:200], perfil)
+        def cancelar_sql() -> None:
+            conexion = en_curso.get("conexion")
+            if conexion is not None and conexion.cancelar():
+                log.info("Sentencia de %s cancelada en el servidor.", herramienta.nombre)
+
+        detalle = ", ".join(f"{k}={v!r}" for k, v in argumentos.items())[:200]
+        log.info("-> %s(%s) perfil=%s", herramienta.nombre, detalle, perfil)
+        await _avisar(ctx, "debug", f"Ejecutando {herramienta.nombre}({detalle}) en el perfil {perfil or 'default'}…", 0, 1)
         try:
-            resultado = await asyncio.wait_for(anyio.to_thread.run_sync(ejecutar), timeout=config.agente.timeout_herramienta)
+            resultado = await asyncio.wait_for(anyio.to_thread.run_sync(ejecutar), timeout=timeout)
         except TimeoutError as ex:
-            raise ToolError(f"{herramienta.nombre} superó el tiempo máximo de {config.agente.timeout_herramienta} s.") from ex
+            cancelar_sql()
+            await _avisar(ctx, "warning", f"{herramienta.nombre} superó {timeout} s; la consulta fue cancelada en SQL Server.")
+            raise ToolError(f"{herramienta.nombre} superó el tiempo máximo de {timeout} s; la consulta se canceló.") from ex
+        except asyncio.CancelledError:
+            cancelar_sql()  # el cliente canceló la petición: no dejar la consulta corriendo en el servidor
+            raise
         except TypeError as ex:
             raise ToolError(f"Argumentos inválidos para {herramienta.nombre}: {ex}") from ex
         except Exception as ex:
             log.warning("ERROR %s: %s", herramienta.nombre, ex)
+            await _avisar(ctx, "error", f"{herramienta.nombre} falló: {str(ex)[:300]}")
             raise ToolError(f"{type(ex).__name__}: {str(ex)[:2000]}") from ex
         if isinstance(resultado, dict) and "error" in resultado and len(resultado) <= 3:
             raise ToolError(str(resultado["error"]))
         recortado = recortar(resultado, max_caracteres)
+        if isinstance(recortado, dict) and recortado.get("_recortado"):
+            omitidos = {k[len("_omitidos_"):]: v for k, v in recortado.items() if k.startswith("_omitidos")}
+            await _avisar(ctx, "info", f"Resultado de {herramienta.nombre} recortado a {max_caracteres} caracteres; omitidos: {omitidos}. "
+                                       "Sube max_caracteres si necesitas más.", 1, 1)
         return recortado if isinstance(recortado, dict) else {"resultado": recortado}
 
     wrapper.__name__ = herramienta.nombre

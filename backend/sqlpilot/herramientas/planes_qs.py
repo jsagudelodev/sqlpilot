@@ -208,7 +208,7 @@ def plan_real(conexion: ConexionSql, sql: str, timeout_segundos: int = 60) -> di
             return {"error": veredicto.motivo}
 
     conn = conexion.conn
-    cursor = conn.cursor()
+    cursor = conexion.cursor()
     planes: list[str] = []
     filas_leidas = 0
     try:
